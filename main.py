@@ -1,9 +1,9 @@
-
 import torch
 import torch.nn as nn
 from torchtext.data.utils import get_tokenizer
 from torchtext.datasets import Multi30k
 from torchtext.vocab import build_vocab_from_iterator
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from transformer import Transformer
 
@@ -28,7 +28,7 @@ def yield_tokens(data_iter):
 vocab_transform = {}
 train_iter = Multi30k(split='train', language_pair=(SRC_LANGUAGE, TGT_LANGUAGE))
 vocab_transform[SRC_LANGUAGE] = build_vocab_from_iterator(yield_tokens(train_iter), specials=special_symbols)
-vocab_transform[TGT_LANGUAGE] = build_vocab_from_iterator(yield_tokens(train_iter), specials=special_symbols)
+vocab_transform[TGT_LANGUAGE] = build_vocab_from_iterator(yield_tokens(train_iter), specials=special_symbols,)
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
     vocab_transform[ln].set_default_index(UNK_IDX)
@@ -45,38 +45,82 @@ def preprocess(src_sentence, tgt_sentence):
 # Model Hyperparameters
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# 创建模型
-model = Transformer(num_layers=6, d_model=512, nhead=8, d_ff=2048, 
-                    src_vocab_size=len(vocab_transform[SRC_LANGUAGE]), 
-                    tgt_vocab_size=len(vocab_transform[TGT_LANGUAGE]),
-                    src_pad_idx=PAD_IDX, tgt_pad_idx=PAD_IDX).to(device)
+# Creating the model
+model = Transformer(src_pad_idx=PAD_IDX, 
+                    trg_pad_idx=PAD_IDX, 
+                    trg_sos_idx=BOS_IDX,
+                    enc_voc_size=len(vocab_transform[SRC_LANGUAGE]), 
+                    dec_voc_size=len(vocab_transform[TGT_LANGUAGE]),
+                    d_model=512, n_head=8, max_len=100, 
+                    ffn_hidden=2048, n_layers=6, 
+                    drop_prob=0.1, 
+                    device=device).to(device)
 
-#定义损失函数
+# Initialize model weights
+def init_weights(m):
+    for name, param in m.named_parameters():
+        if 'weight' in name:
+            nn.init.normal_(param.data, mean=0, std=0.01)
+        else:
+            nn.init.constant_(param.data, 0)
+
+model.apply(init_weights)
+
+# Define loss function
 criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
 
-#定义优化器
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+# Define optimizer
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
 
-train_iter = Multi30k(split='train', language_pair=(SRC_LANGUAGE, TGT_LANGUAGE))
-for epoch in range(5):
+# Define learningrate scheduler
+scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=10)
+
+# Training loop
+for epoch in range(50):  # 50 epochs
+    model.train()
     total_loss = 0
+    total_batches = 0
+
     for i, (src_sentence, tgt_sentence) in enumerate(train_iter):
         optimizer.zero_grad()
         src, tgt = preprocess(src_sentence, tgt_sentence)
-        output = model(src, tgt) 
+        print("Size of source tensor: ", src.shape)
+        print("Size of target tensor: ", tgt.shape)
         
-        output_dim = output.shape[-1]
-        output = output.view(-1, output_dim)
-        tgt = tgt.view(-1)
+        # tgt[:-1] is used to remove the last element in each sentence in the batch, since the decoder should not receive it
+        output = model(src, tgt[:-1])
+        print("Size of source tensor after model: ", src.shape)
+        print("Size of target tensor after model: ", tgt[:-1].shape)
 
+        output_dim = output.shape[-1]
+        output = output.contiguous().view(-1, output_dim)
+        
+        # tgt[1:] is used to remove <sos> in each sentence in the batch, as the model is not supposed to generate it
+        tgt = tgt[1:].contiguous().view(-1)
+
+        print("Size of target tensor after reshaping: ", tgt.shape)
+        
         loss = criterion(output, tgt)
         loss.backward()
+    
+        # Clipping the gradients to avoid exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+        
         optimizer.step()
-
         total_loss += loss.item()
+        total_batches += 1
 
-        if i % 100 == 0:  # 每100个batch打印一次训练信息
-            print(f'Epoch: {epoch}, Batch: {i}, Loss: {total_loss / (i+1)}')
+        # Logging
+        if total_batches % 1000 == 0:
+            avg_loss = total_loss/1000
+            print('Epoch:', epoch, 'Batch:', total_batches, 'Avg Batch Loss:', avg_loss)
+            total_loss = 0
+            
+    # Evaluation loop with(validation data), early stopping, model checkpoint saving, etc.
+    # TODO
+
+    # Decay learning rate
+    scheduler.step(avg_loss)
 
 # Save model parameters
 torch.save(model.state_dict(), 'model.pth')
