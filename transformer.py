@@ -58,7 +58,9 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, q, k, v, mask=None):
         # 1. dot product with weight matrices
+        # ! problems were here
         q, k, v = self.w_q(q), self.w_k(k), self.w_v(v)
+        print("before split, Q, K, V shape:", q.shape, k.shape, v.shape)
 
         # 2. split tensor by number of heads
         q, k, v = self.split(q), self.split(k), self.split(v)
@@ -125,8 +127,6 @@ class ScaleDotProductAttention(nn.Module):
 
         # 1. dot product Query with Key^T to compute similarity
         k_t = k.transpose(2, 3)  # transpose
-        print("Q shape", q.shape)
-        print("K shape", k_t.shape)
         score = (q @ k_t) / math.sqrt(d_tensor)  # scaled dot product
 
         # 2. apply masking (opt)
